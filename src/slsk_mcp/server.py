@@ -273,6 +273,40 @@ async def peer_status(username: str) -> dict:
         return ErrorResponse(code="network_error", message=str(exc)).model_dump()
 
 
+@mcp.tool()
+async def send_chat(username: str, message: str) -> dict:
+    """Send a private chat message to a Soulseek user.
+
+    Useful when a peer runs an anti-leech bot that gates downloads behind a
+    chat reply. Check get_messages() for any challenge text first, then reply.
+    """
+    try:
+        await _connect()
+    except RuntimeError as exc:
+        return ErrorResponse(code="not_authenticated", message=str(exc)).model_dump()
+
+    try:
+        return await _with_retry(lambda: _W.send_chat(username, message))
+    except Exception as exc:
+        return ErrorResponse(code="network_error", message=str(exc)).model_dump()
+
+
+@mcp.tool()
+async def get_messages(clear: bool = True) -> dict:
+    """Return inbound private chat messages received this session (newest last).
+
+    Populated whenever another user messages you — e.g. an anti-leech bot's
+    challenge. By default the buffer is cleared once read; pass clear=false to
+    peek without draining it.
+    """
+    try:
+        await _connect()
+    except RuntimeError as exc:
+        return ErrorResponse(code="not_authenticated", message=str(exc)).model_dump()
+
+    return {"messages": _W.get_messages(clear=clear)}
+
+
 # ── Search Tips (served via slsk://search_tips resource) ─────────────────────
 
 SEARCH_TIPS = {

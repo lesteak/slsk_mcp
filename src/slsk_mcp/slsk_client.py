@@ -9,10 +9,14 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from collections import deque
+
 from aioslsk.client import SoulSeekClient
 from aioslsk.settings import Settings, CredentialsSettings, ListeningConnectionErrorMode
 from aioslsk.search.model import SearchRequest as SlskSearchRequest
 from aioslsk.transfer.model import Transfer
+from aioslsk.commands import PrivateMessageCommand
+from aioslsk.events import PrivateMessageEvent
 
 from .models import (
     SearchResultItem,
@@ -136,6 +140,10 @@ class SoulseekWrapper:
         _max_search = int(os.environ.get("SLSK_MAX_CONCURRENT_SEARCH", "4"))
         self._search_sem = asyncio.Semaphore(_max_search)
 
+        # Inbound private-message buffer (for anti-leech chat gates etc.)
+        _msg_max = int(os.environ.get("SLSK_MESSAGE_BUFFER", "200"))
+        self._messages: deque = deque(maxlen=_msg_max)
+
     # ── Properties ───────────────────────────────────────────────────────
 
     @property
@@ -196,6 +204,11 @@ class SoulseekWrapper:
         try:
             await self._client.start()
             await self._client.login()
+            # Listen for inbound private messages so tools can read/respond
+            # (e.g. anti-leech bots that gate downloads behind a chat reply).
+            self._client.events.register(
+                PrivateMessageEvent, self._on_private_message
+            )
         except Exception as exc:
             logger.error("Login failed: %s", exc)
             try:
@@ -574,6 +587,35 @@ class SoulseekWrapper:
             return {"status": "cancelled", "received_bytes": received}
         except Exception:
             return {"status": "not_found", "received_bytes": received}
+
+    # ── Private chat ──────────────────────────────────────────────────────
+
+    async def _on_private_message(self, event: PrivateMessageEvent) -> None:
+        """Buffer inbound private messages for later retrieval."""
+        try:
+            cm = event.message
+            self._messages.append({
+                "id": getattr(cm, "id", None),
+                "user": cm.user.name,
+                "message": cm.message,
+                "timestamp": getattr(cm, "timestamp", None),
+                "is_direct": getattr(cm, "is_direct", None),
+            })
+        except Exception as exc:  # never let a listener error break the client
+            logger.warning("private-message listener error: %s", exc)
+
+    async def send_chat(self, username: str, message: str) -> Dict[str, Any]:
+        """Send a private chat message to a Soulseek user."""
+        assert self._client is not None
+        await self._client.execute(PrivateMessageCommand(username, message))
+        return {"status": "sent", "username": username, "message": message}
+
+    def get_messages(self, clear: bool = True) -> List[Dict[str, Any]]:
+        """Return buffered inbound private messages (newest last); clear by default."""
+        msgs = list(self._messages)
+        if clear:
+            self._messages.clear()
+        return msgs
 
     # ── Peer Status ───────────────────────────────────────────────────────
 
